@@ -451,7 +451,7 @@ MODULE util
 
 	END FUNCTION month_end
 
-	SUBROUTINE array_extents(arr,in_start,in_end,i_start,i_end,reverse)
+	SUBROUTINE array_extents(arr,in_start,in_end,i_start,i_end,reverse,periodic)
 
 		USE global_data, ONLY: delta_coord
 
@@ -461,6 +461,7 @@ MODULE util
 		REAL, INTENT(IN)               :: in_start, in_end
 		INTEGER, INTENT(OUT)           :: i_start, i_end
 		LOGICAL,OPTIONAL,INTENT(IN)    :: reverse
+		LOGICAL,OPTIONAL,INTENT(IN)    :: periodic
 
 		!!! Locals
 		INTEGER :: i
@@ -468,10 +469,15 @@ MODULE util
 
 		i_start = -1
 		i_end   = -1
-		if ( in_start > in_end ) then
-			!!! Swap bounds if necessary
-			end   = in_start
-			start = in_end
+		if( .not.present(periodic) .or. .not.periodic ) then
+			if ( in_start > in_end ) then
+				!!! Swap bounds if necessary
+				end   = in_start
+				start = in_end
+			else
+				start = in_start
+				end   = in_end
+			end if
 		else
 			start = in_start
 			end   = in_end
@@ -500,7 +506,25 @@ MODULE util
 		end if
 
 		if ( i_start == -1 ) i_start = 1
-		if ( i_end == -1 ) i_end = size(arr)
+		if ( i_end == -1 ) then
+			if ( present(periodic) .and. periodic ) then
+				!!! If we haven't found and 'end', check if we need to wrap around
+				if ( end < start ) then
+					!!! Redo the loop from the start
+					do i=1,SIZE(arr)
+						if ( i_end == -1 ) then
+							if ( abs(arr(i) - end) < delta_coord ) i_end = i
+						else
+							exit
+						end if
+					end do
+				else
+					i_end = size(arr)
+				end if
+			else
+				i_end = size(arr)
+			end if
+		end if
 
 	END SUBROUTINE array_extents
 
@@ -2846,8 +2870,8 @@ MODULE input_data_handling_era5
 
 
 		if( present(extents) ) then
-			call array_extents(lat1d, extents(1),extents(2),dim_i_start,dim_i_end,.true.)
-			call array_extents(lon1d, extents(3),extents(4),dim_j_start,dim_j_end)
+			call array_extents(lat1d, extents(1),extents(2),dim_i_start,dim_i_end,reverse=.true.)
+			call array_extents(lon1d, extents(3),extents(4),dim_j_start,dim_j_end,periodic=.true.)
 			call array_extents(levels,extents(5),extents(6),dim_k_start,dim_k_end)
 			dim_i_start = dim_i_start + bdy
 			dim_j_start = dim_j_start + bdy
@@ -2864,7 +2888,12 @@ MODULE input_data_handling_era5
 		endif
 
 		dim_i = dim_i_end - dim_i_start + 1
-		dim_j = dim_j_end - dim_j_start + 1
+		!!! dim_j is longitude and is periodic
+		if ( dim_j_end > dim_j_start ) then
+			dim_j = dim_j_end - dim_j_start + 1
+		else
+			dim_j = fdim_j - dim_j_start + dim_j_end + 1
+		end if
 		dim_k = dim_k_end - dim_k_start + 1
 
 		allocate(lat2d(dim_j,dim_i))
@@ -2874,9 +2903,17 @@ MODULE input_data_handling_era5
 			lat2d(idim,:) = lat1d(dim_i_start:dim_i_end)
 		end do
 
-		do idim = 1,dim_i
-			lon2d(:,idim) = lon1d(dim_j_start:dim_j_end)
-		end do
+		!!! Handle periodicity in longitude
+		if ( dim_j_start < dim_j_end ) then
+			do idim = 1,dim_i
+				lon2d(:,idim) = lon1d(dim_j_start:dim_j_end)
+			end do
+		else
+			do idim = 1,dim_i
+				lon2d(1:fdim_j-dim_j_start+1,idim) = lon1d(dim_j_start:fdim_j)
+				lon2d(fdim_j-dim_j_start+2:dim_j,idim) = lon1d(1:dim_j_end)
+			end do
+		end if
 
 		call all_positive_longitude(lon2d,lon2d)
 
@@ -3220,7 +3257,7 @@ PROGRAM back_traj
 	!----------------------------------------------------------------
 	! Get header info from first input file
 	!!! Note that values in the extents array MUST match coord points in the data
-	call get_grid_data(ptop, delx, datatstep, lat2d, lon2d, (/ -59.75, 0.5, 89.75, 180.0, 500.0, 1000.0 /) )
+	call get_grid_data(ptop, delx, datatstep, lat2d, lon2d, (/ -59.75, 0.5, 89.75, -150.0, 500.0, 1000.0 /) )
 	!--------------------------------------------------------
 
      print *,"dim_j, dim_i, dim_k",dim_j,dim_i, dim_k
