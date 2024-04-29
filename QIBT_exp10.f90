@@ -3096,7 +3096,6 @@ print *, 'dim_k_start,dim_k_end',dim_k_start,dim_k_end
 		status = nf90_close(wsncid)
 		if(status /= nf90_NoErr) call handle_err(status)
 
-
 	END SUBROUTINE
 
 	!!! Future TO-DO - rewrite this and get_data to open each era5 file only once
@@ -3553,7 +3552,7 @@ PROGRAM back_traj
 		!seem to work otherwise!!!????
 
 		print *, 'Starting parallelisation'
-!$OMP PARALLEL DEFAULT(PRIVATE) COPYIN(daytsteps,totsteps,indatatsteps,datadaysteps,datatotsteps,dim_i,dim_j,dim_k,sday,smon,syear,mon,year,day,dd,totpts,ssdim) SHARED(pw,tpw,u,v,w,pres,act_temp,surf_pres,evap,precip,mix,mixtot,pbl_lev,lat2d,lon2d,orec,outncid,wvcid,wvc2id,xlocid,ylocid,dayid,opreid,wsmask)
+!$OMP PARALLEL DEFAULT(PRIVATE) SHARED(pw,tpw,u,v,w,pres,act_temp,surf_pres,evap,precip,mix,mixtot,pbl_lev,lat2d,lon2d,orec,outncid,wvcid,wvc2id,xlocid,ylocid,dayid,opreid,wsmask,daytsteps,totsteps,indatatsteps,datadaysteps,datatotsteps,dim_i,dim_j,dim_k,sday,smon,syear,mon,year,day,dd,totpts,ssdim)
 		!allocate these arrays for each thread
 		ALLOCATE( WV_cont(dim_j,dim_i),WV_cont_day(dim_j,dim_i), &
 				WV_cont_apbl(dim_j,dim_i),WV_cont_day_apbl(dim_j,dim_i), &
