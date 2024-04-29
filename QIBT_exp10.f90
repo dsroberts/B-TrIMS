@@ -117,6 +117,7 @@ REAL, PARAMETER :: delta_coord = 0.0001  ! 1/10000th degree - for floating point
 INTEGER :: daytsteps,totsteps,indatatsteps,datadaysteps,datatotsteps
 INTEGER :: dim_i,dim_j,dim_k,fdim_i,fdim_j,ssdim
 INTEGER :: dim_i_start, dim_j_start, dim_k_start
+INTEGER :: dim_i_end, dim_j_end, dim_k_end
 INTEGER :: mon,year,dd,totpts
 INTEGER :: day
 ! Additional variable to define the number of time intervals in the input data, now that the input data is monthly instead of daily
@@ -133,12 +134,6 @@ REAL, PARAMETER :: Cl = 4400     !heat capacity of liquid water at ~-20C (J/kgK)
 REAL, PARAMETER :: pi = 3.14159265
 REAL, PARAMETER :: deg_dist = 111.   !average distance of 1 degree lat is assumed to be 111km
 REAL, PARAMETER :: water_density = 1000 ! density of water (kg/m3)
-
-COMMON /global_vars/ daytsteps,totsteps,indatatsteps,datadaysteps,datatotsteps, &
-		dim_i,dim_j,dim_k,sday,smon,syear,mon,year,day,dd,totpts, &
-		fdim_i,fdim_j,ssdim,diro
-
-!$OMP THREADPRIVATE(/global_vars/)
 
 END MODULE global_data
 
@@ -2523,7 +2518,7 @@ MODULE input_data_handling_era5
 	SUBROUTINE get_era5_field_r1(d,m,y,field,out,start,count)
 
 		USE netcdf
-		USE global_data, ONLY: dirdata_era5
+		USE global_data, ONLY: dirdata_era5, fdim_j, dim_j_start, dim_j_end
 		USE util, ONLY: handle_err
 
 		IMPLICIT NONE
@@ -2538,6 +2533,9 @@ MODULE input_data_handling_era5
 		INTEGER :: fid, vid
 		INTEGER :: status
 		REAL    :: scale_factor, add_offset
+		INTEGER, DIMENSION(NF90_MAX_VAR_DIMS) :: dimids
+		CHARACTER(len=NF90_MAX_NAME) :: dim_name
+		INTEGER :: lon_idx = -1
 
 		call get_filename(d,m,y,field,fn)
 
@@ -2547,9 +2545,27 @@ MODULE input_data_handling_era5
 		status = nf90_inq_varid(fid, trim(era5_var_k_v_store(field)), vid)
 		if(status /= nf90_NoErr) call handle_err(status)
 
+		!!! Are any of our variable's dimensions longitude?
+		status = nf90_inquire_variable(fid,vid,dimids=dimids)
+		if(status /= nf90_NoErr) call handle_err(status)
+
+		status = nf90_inquire_dimension(fid,dimids(1),name=dim_name)
+		if(status /= nf90_NoErr) call handle_err(status)
+
+		if ( TRIM(dim_name) == "longitude" ) then
+			lon_idx = 1
+		endif
+
 		if(PRESENT(start)) then
 			if(PRESENT(count)) then
-				status = nf90_get_var(fid,vid,out,start=(/start/),count=(/count/))
+				!!! If these conditions are true we're going to cross a periodic boundary
+				if( lon_idx > 0 .and. start + count > fdim_j ) then
+					status = nf90_get_var(fid,vid,out(:fdim_j-dim_j_start+1),start=(/dim_j_start/),count=(/fdim_j - dim_j_start + 1/))
+					if(status /= nf90_NoErr) call handle_err(status)
+					status = nf90_get_var(fid,vid,out(fdim_j-dim_j_start+2:),start=(/1/),count=(/dim_j_end/))
+				else
+					status = nf90_get_var(fid,vid,out,start=(/start/),count=(/count/))
+				end if
 			else
 				status = nf90_get_var(fid,vid,out,start=(/start/))
 			end if
@@ -2584,7 +2600,7 @@ MODULE input_data_handling_era5
 	SUBROUTINE get_era5_field_r2(d,m,y,field,out,starts,counts)
 
 		USE netcdf
-		USE global_data, ONLY: dirdata_era5
+		USE global_data, ONLY: dirdata_era5, fdim_j, dim_j_start, dim_j_end
 		USE util, ONLY: handle_err
 
 		IMPLICIT NONE
@@ -2599,6 +2615,14 @@ MODULE input_data_handling_era5
 		INTEGER :: fid, vid
 		INTEGER :: status
 		REAL    :: scale_factor, add_offset
+		INTEGER, DIMENSION(NF90_MAX_VAR_DIMS) :: dimids
+		CHARACTER(len=NF90_MAX_NAME) :: dim_name
+		INTEGER :: lon_idx = -1
+		INTEGER :: idim
+
+		INTEGER, DIMENSION(2) :: temp_starts
+		INTEGER, DIMENSION(2) :: temp_counts
+		INTEGER, DIMENSION(2,2) :: read_bounds !!! (/ (/ end1, start2 /), (/ end1, start2 /) /)
 
 		call get_filename(d,m,y,field,fn)
 
@@ -2608,9 +2632,37 @@ MODULE input_data_handling_era5
 		status = nf90_inq_varid(fid, trim(era5_var_k_v_store(field)), vid)
 		if(status /= nf90_NoErr) call handle_err(status)
 
+		!!! Are any of our variable's dimensions longitude?
+		status = nf90_inquire_variable(fid,vid,dimids=dimids)
+		if(status /= nf90_NoErr) call handle_err(status)
+
+		do idim=1,2
+			status = nf90_inquire_dimension(fid,dimids(idim),name=dim_name)
+			if(status /= nf90_NoErr) call handle_err(status)
+
+			if ( TRIM(dim_name) == "longitude" ) then
+				lon_idx = idim
+				read_bounds(:,idim) = (/ fdim_j-dim_j_start+1, fdim_j-dim_j_start+2  /)
+			else
+				read_bounds(:,idim) = (/ size(out,dim=idim),1 /)
+			endif
+		end do
+
 		if(PRESENT(starts)) then
 			if(PRESENT(counts)) then
-				status = nf90_get_var(fid,vid,out,start=starts,count=counts)
+				if( lon_idx > 0 .and. starts(lon_idx) + counts(lon_idx) > fdim_j ) then
+					temp_starts = starts
+					temp_counts = counts
+					temp_starts(lon_idx) = dim_j_start
+					temp_counts(lon_idx) = fdim_j - dim_j_start + 1
+					status = nf90_get_var(fid,vid,out(:read_bounds(1,1),:read_bounds(1,2)),start=temp_starts,count=temp_counts)
+					if(status /= nf90_NoErr) call handle_err(status)
+					temp_starts(lon_idx) = 1
+					temp_counts(lon_idx) = dim_j_end
+					status = nf90_get_var(fid,vid,out(read_bounds(2,1):,read_bounds(2,2):),start=temp_starts,count=temp_counts)
+				else
+					status = nf90_get_var(fid,vid,out,start=starts,count=counts)
+				end if
 			else
 				status = nf90_get_var(fid,vid,out,start=starts)
 			end if
@@ -2645,7 +2697,7 @@ MODULE input_data_handling_era5
 	SUBROUTINE get_era5_field_r3(d,m,y,field,out,starts,counts)
 
 		USE netcdf
-		USE global_data, ONLY: dirdata_era5
+		USE global_data, ONLY: dirdata_era5, fdim_j, dim_j_start, dim_j_end
 		USE util, ONLY: handle_err
 
 		IMPLICIT NONE
@@ -2660,6 +2712,14 @@ MODULE input_data_handling_era5
 		INTEGER :: fid, vid
 		INTEGER :: status
 		REAL    :: scale_factor, add_offset
+		INTEGER, DIMENSION(NF90_MAX_VAR_DIMS) :: dimids
+		CHARACTER(len=NF90_MAX_NAME) :: dim_name
+		INTEGER :: lon_idx = -1
+		INTEGER :: idim
+
+		INTEGER, DIMENSION(3) :: temp_starts
+		INTEGER, DIMENSION(3) :: temp_counts
+		INTEGER, DIMENSION(2,3) :: read_bounds !!! (/ (/ end1, start2 /), (/ end1, start2 /), (/ end1, start2 /) /)
 
 		call get_filename(d,m,y,field,fn)
 
@@ -2669,9 +2729,37 @@ MODULE input_data_handling_era5
 		status = nf90_inq_varid(fid, trim(era5_var_k_v_store(field)), vid)
 		if(status /= nf90_NoErr) call handle_err(status)
 
+		!!! Are any of our variable's dimensions longitude?
+		status = nf90_inquire_variable(fid,vid,dimids=dimids)
+		if(status /= nf90_NoErr) call handle_err(status)
+
+		do idim=1,3
+			status = nf90_inquire_dimension(fid,dimids(idim),name=dim_name)
+			if(status /= nf90_NoErr) call handle_err(status)
+
+			if ( TRIM(dim_name) == "longitude" ) then
+				lon_idx = idim
+				read_bounds(:,idim) = (/ fdim_j-dim_j_start+1, fdim_j-dim_j_start+2  /)
+			else
+				read_bounds(:,idim) = (/ size(out,dim=idim),1 /)
+			endif
+		end do
+
 		if(PRESENT(starts)) then
 			if(PRESENT(counts)) then
-				status = nf90_get_var(fid,vid,out,start=starts,count=counts)
+				if( lon_idx > 0 .and. starts(lon_idx) + counts(lon_idx) > fdim_j ) then
+					temp_starts = starts
+					temp_counts = counts
+					temp_starts(lon_idx) = dim_j_start
+					temp_counts(lon_idx) = fdim_j - dim_j_start + 1
+					status = nf90_get_var(fid,vid,out(:read_bounds(1,1),:read_bounds(1,2),:read_bounds(1,3)),start=temp_starts,count=temp_counts)
+					if(status /= nf90_NoErr) call handle_err(status)
+					temp_starts(lon_idx) = 1
+					temp_counts(lon_idx) = dim_j_end
+					status = nf90_get_var(fid,vid,out(read_bounds(2,1):,read_bounds(2,2):,read_bounds(2,3):),start=temp_starts,count=temp_counts)
+				else
+					status = nf90_get_var(fid,vid,out,start=starts,count=counts)
+				end if
 			else
 				status = nf90_get_var(fid,vid,out,start=starts)
 			end if
@@ -2685,19 +2773,19 @@ MODULE input_data_handling_era5
 		if(status /= nf90_NoErr) call handle_err(status)
 
 		!!! Get scale_factor and add_offset (if any)
-    status = nf90_get_att(fid, vid, "scale_factor", scale_factor)
-    if( status /= nf90_NoErr ) then
-      !!! OK if attribute not found - set it to 1.0
-      if ( status /= nf90_eNotAtt ) call handle_err(status)
-      scale_factor = 1.0
-    endif
+		status = nf90_get_att(fid, vid, "scale_factor", scale_factor)
+		if( status /= nf90_NoErr ) then
+		  !!! OK if attribute not found - set it to 1.0
+		  if ( status /= nf90_eNotAtt ) call handle_err(status)
+		  scale_factor = 1.0
+		endif
 
-    status = nf90_get_att(fid, vid, "add_offset", add_offset)
-    if( status /= nf90_NoErr ) then
-      !!! OK if attribute not found - set it to 0.0
-      if ( status /= nf90_eNotAtt ) call handle_err(status)
-      add_offset = 0.0
-    endif
+		status = nf90_get_att(fid, vid, "add_offset", add_offset)
+		if( status /= nf90_NoErr ) then
+		  !!! OK if attribute not found - set it to 0.0
+		  if ( status /= nf90_eNotAtt ) call handle_err(status)
+		  add_offset = 0.0
+		endif
 
 		out = scale_factor * out + add_offset
 
@@ -2706,7 +2794,7 @@ MODULE input_data_handling_era5
 	SUBROUTINE get_era5_field_r4(d,m,y,field,out,starts,counts)
 
 		USE netcdf
-		USE global_data, ONLY: dirdata_era5
+		USE global_data, ONLY: dirdata_era5, fdim_j, dim_j_start, dim_j_end, dim_i, dim_j
 		USE util, ONLY: handle_err
 
 		IMPLICIT NONE
@@ -2721,6 +2809,16 @@ MODULE input_data_handling_era5
 		INTEGER :: fid, vid
 		INTEGER :: status
 		REAL    :: scale_factor, add_offset
+		INTEGER, DIMENSION(NF90_MAX_VAR_DIMS) :: dimids
+		CHARACTER(len=NF90_MAX_NAME) :: dim_name
+		INTEGER :: lon_idx = -1
+		INTEGER :: idim
+
+		INTEGER, DIMENSION(4) :: temp_starts
+		INTEGER, DIMENSION(4) :: temp_counts
+		INTEGER, DIMENSION(2,4) :: read_bounds !!! (/ (/ end1, start2 /), (/ end1, start2 /), (/ end1, start2 /), (/ end1, start2 /) /)
+
+		INTEGER :: latid,lonid,vlatid,vlonid, stat
 
 		call get_filename(d,m,y,field,fn)
 
@@ -2730,9 +2828,37 @@ MODULE input_data_handling_era5
 		status = nf90_inq_varid(fid, trim(era5_var_k_v_store(field)), vid)
 		if(status /= nf90_NoErr) call handle_err(status)
 
+				!!! Are any of our variable's dimensions longitude?
+		status = nf90_inquire_variable(fid,vid,dimids=dimids)
+		if(status /= nf90_NoErr) call handle_err(status)
+
+		do idim=1,4
+			status = nf90_inquire_dimension(fid,dimids(idim),name=dim_name)
+			if(status /= nf90_NoErr) call handle_err(status)
+
+			if ( TRIM(dim_name) == "longitude" ) then
+				lon_idx = idim
+				read_bounds(:,idim) = (/ fdim_j-dim_j_start+1, fdim_j-dim_j_start+2  /)
+			else
+				read_bounds(:,idim) = (/ size(out,dim=idim),1 /)
+			endif
+		end do
+
 		if(PRESENT(starts)) then
 			if(PRESENT(counts)) then
-				status = nf90_get_var(fid,vid,out,start=starts,count=counts)
+				if( lon_idx > 0 .and. starts(lon_idx) + counts(lon_idx) > fdim_j ) then
+					temp_starts = starts
+					temp_counts = counts
+					temp_starts(lon_idx) = dim_j_start
+					temp_counts(lon_idx) = fdim_j - dim_j_start + 1
+					status = nf90_get_var(fid,vid,out(:read_bounds(1,1),:read_bounds(1,2),:read_bounds(1,3),:read_bounds(1,4)),start=temp_starts,count=temp_counts)
+					if(status /= nf90_NoErr) call handle_err(status)
+					temp_starts(lon_idx) = 1
+					temp_counts(lon_idx) = dim_j_end
+					status = nf90_get_var(fid,vid,out(read_bounds(2,1):,read_bounds(2,2):,read_bounds(2,3):,read_bounds(2,4):),start=temp_starts,count=temp_counts)
+				else
+					status = nf90_get_var(fid,vid,out,start=starts,count=counts)
+				end if
 			else
 				status = nf90_get_var(fid,vid,out,start=starts)
 			end if
@@ -2798,7 +2924,7 @@ MODULE input_data_handling_era5
 
 	SUBROUTINE get_grid_data(ptop, delx, datatstep, lat2d, lon2d, extents)
 
-		USE global_data, ONLY: syear, smon, sday, dirdata_era5, totpts, bdy, datansteps, dim_i_start, dim_j_start, dim_k_start, dim_i, dim_j, dim_k
+		USE global_data, ONLY: syear, smon, sday, dirdata_era5, totpts, bdy, datansteps, dim_i_start, dim_j_start, dim_k_start, dim_i, dim_j, dim_k, fdim_i, fdim_j, dim_i_end, dim_j_end, dim_k_end
 		USE util, ONLY: int_to_string, handle_err, all_positive_longitude, to_iso_date, month_end, array_extents
 		USE netcdf
 
@@ -2812,10 +2938,10 @@ MODULE input_data_handling_era5
 		!!! Locals
 		INTEGER :: status
 		INTEGER :: headncid, tstepid, latcrsid, loncrsid, levelid
-		INTEGER :: fdim_i, fdim_j, fdim_k
-		INTEGER :: dim_i_end, dim_j_end, dim_k_end
+		INTEGER :: fdim_k
 		INTEGER :: idim
 		REAL, ALLOCATABLE, DIMENSION(:) :: lat1d, lon1d, levels
+
 		REAL, DIMENSION(2)              :: input_timeseries
 		CHARACTER(len=100) :: fname
 
@@ -2934,7 +3060,7 @@ print *, 'dim_k_start,dim_k_end',dim_k_start,dim_k_end
 
 	SUBROUTINE get_watershed(wsmask)
 
-		USE global_data, ONLY: diri_era5, fwshed_era5,dim_i,dim_j,dim_i_start, dim_j_start
+		USE global_data, ONLY: diri_era5, fwshed_era5,dim_i,dim_j,dim_i_start, dim_j_start, dim_j_end, fdim_j
 		USE util, ONLY: handle_err
 		USE netcdf
 
@@ -2945,6 +3071,7 @@ print *, 'dim_k_start,dim_k_end',dim_k_start,dim_k_end
 		!!! Locals
 		INTEGER :: wsncid, wsid, status
 		CHARACTER(len=100) :: fname
+		INTEGER :: stat
 
 		fname=TRIM(diri_era5)//TRIM(fwshed_era5)
 
@@ -2957,11 +3084,18 @@ print *, 'dim_k_start,dim_k_end',dim_k_start,dim_k_end
 		status = nf90_inq_varid(wsncid, "wsmask", wsid)  !watershed mask
 		if(status /= nf90_NoErr) call handle_err(status)
 
-	  status = nf90_get_var(wsncid, wsid, wsmask,start=(/dim_j_start, dim_i_start/), count=(/dim_j, dim_i/))
+		if ( dim_j_start < dim_j_end ) then
+			status = nf90_get_var(wsncid, wsid, wsmask,start=(/dim_j_start, dim_i_start/), count=(/dim_j, dim_i/))
+		else
+			status = nf90_get_var(wsncid, wsid, wsmask(1:fdim_j-dim_j_start+1,:),start=(/dim_j_start, dim_i_start/), count=(/fdim_j-dim_j_start+1, dim_i/))
+			if(status /= nf90_NoErr) call handle_err(status)
+			status = nf90_get_var(wsncid, wsid, wsmask(fdim_j-dim_j_start+2:dim_j,:),start=(/1, dim_i_start/), count=(/dim_j_end, dim_i/))
+		end if
   	if(status /= nf90_NoErr) call handle_err(status)
 
 		status = nf90_close(wsncid)
 		if(status /= nf90_NoErr) call handle_err(status)
+
 
 	END SUBROUTINE
 
@@ -3257,7 +3391,7 @@ PROGRAM back_traj
 	!----------------------------------------------------------------
 	! Get header info from first input file
 	!!! Note that values in the extents array MUST match coord points in the data
-	call get_grid_data(ptop, delx, datatstep, lat2d, lon2d, (/ -59.75, 0.5, 89.75, -150.0, 500.0, 1000.0 /) )
+	call get_grid_data(ptop, delx, datatstep, lat2d, lon2d, (/ -59.75, 0.5, 89.75, 180.0, 500.0, 1000.0 /) )
 	!--------------------------------------------------------
 
      print *,"dim_j, dim_i, dim_k",dim_j,dim_i, dim_k
@@ -3357,8 +3491,8 @@ PROGRAM back_traj
 		pres = pp ! No need to add a perturbation pressure with ERA5 data
 		surf_pres = psfc
 
-        !calculate the model level just above the boundary layer height
-        call calc_pbl_lev(pbl_hgt,pres,surf_pres,pbl_lev)
+		!calculate the model level just above the boundary layer height
+		call calc_pbl_lev(pbl_hgt,pres,surf_pres,pbl_lev)
   
 		! wrfout gives T as pertubation potential temperature. Model expects actual temperature, so convert it:
 		! No need with ERA5 data
@@ -3386,7 +3520,7 @@ PROGRAM back_traj
 		! *Potential temperature and equivalent potential temperature can be calculated here.*
 
 		!calculate the model level just above the boundary layer height
-        call calc_pbl_lev(pbl_hgt,pres,surf_pres,pbl_lev)
+		call calc_pbl_lev(pbl_hgt,pres,surf_pres,pbl_lev)
 
 		! wrfout gives T as pertubation potential temperature. Model expects actual temperature, so convert it:
 		call calc_actual_temp(temp,pres,act_temp)
